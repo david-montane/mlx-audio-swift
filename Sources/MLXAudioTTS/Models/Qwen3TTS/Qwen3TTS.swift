@@ -79,6 +79,49 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
         )
     }
 
+    /// A complete generation result, with termination observed from codec tokens.
+    public struct GenerationCompletion: @unchecked Sendable {
+        public let audio: MLXArray
+        public let didReachEOS: Bool
+        public let tokenCount: Int
+    }
+
+    /// Returns only after native generation and decoding have stopped.
+    public func generateWithCompletion(
+        text: String,
+        voice: String?,
+        refAudio: sending MLXArray?,
+        refText: String?,
+        language: String?,
+        generationParameters: GenerateParameters
+    ) async throws -> sending GenerationCompletion {
+        try requireGenerationComponents()
+        let settings = resolveVoiceDesignGenerationSettings(
+            language: language,
+            generationParameters: generationParameters
+        )
+        let eosTokenId = config.talkerConfig!.codecEosTokenId
+        var didReachEOS = false
+        var tokenCount = 0
+        let audio = try generateVoiceDesign(
+            text: text,
+            instruct: voice,
+            language: settings.language,
+            refAudio: refAudio,
+            refText: refText,
+            temperature: settings.temperature,
+            topK: settings.topK,
+            topP: settings.topP,
+            repetitionPenalty: settings.repetitionPenalty,
+            minP: settings.minP,
+            maxTokens: settings.maxTokens,
+            onToken: { token in didReachEOS = token == eosTokenId },
+            onInfo: { info in tokenCount = info.generationTokenCount }
+        )
+        try Task.checkCancellation()
+        return GenerationCompletion(audio: audio, didReachEOS: didReachEOS, tokenCount: tokenCount)
+    }
+
     public func generateStream(
         text: String,
         voice: String?,
