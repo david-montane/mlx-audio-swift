@@ -115,6 +115,7 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
             repetitionPenalty: settings.repetitionPenalty,
             minP: settings.minP,
             maxTokens: settings.maxTokens,
+            limitTokensToTextLength: false,
             onToken: { token in didReachEOS = token == eosTokenId },
             onInfo: { info in tokenCount = info.generationTokenCount }
         )
@@ -361,6 +362,7 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
         repetitionPenalty: Float,
         minP: Float,
         maxTokens: Int,
+        limitTokensToTextLength: Bool = true,
         streamingInterval: Double = 2.0,
         onToken: ((Int) -> Void)? = nil,
         onInfo: ((AudioGenerationInfo) -> Void)? = nil,
@@ -422,7 +424,7 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
 
         // Cap max tokens based on text length
         let targetTokenCount = tokenizer.encode(text: text).count
-        let effectiveMaxTokens = min(maxTokens, max(75, targetTokenCount * 6))
+        let effectiveMaxTokens = limitTokensToTextLength ? min(maxTokens, max(75, targetTokenCount * 6)) : maxTokens
 
         // Initialize cache and timing
         let startTime = Date()
