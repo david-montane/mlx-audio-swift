@@ -468,13 +468,13 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
     // MARK: - Text Tokenization
 
     /// Tokenize text into token IDs for T3.
-    func tokenizeText(_ text: String, language: String? = nil) throws -> MLXArray {
+    func tokenizeText(_ text: String, language: String? = nil, validateMultilingual: Bool = true) throws -> MLXArray {
         guard let tokenizer = tokenizer else {
             throw AudioGenerationError.modelNotInitialized("Tokenizer not loaded")
         }
 
         var input = text
-        if config.t3Config.isMultilingual {
+        if config.t3Config.isMultilingual && validateMultilingual {
             guard let language, ["es", "en"].contains(language.lowercased()),
                   config.textPreprocessing.lowercased() == "nfkd,fullcase" else {
                 throw AudioGenerationError.invalidInput("This multilingual runtime supports V3 Spanish and English.")
@@ -709,14 +709,22 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         language: String?,
         generationParameters: GenerateParameters
     ) async throws -> sending MLXArray {
-        let result = try await generateWithCompletion(text: text, voice: voice, refAudio: refAudio,
-            refText: refText, language: language, generationParameters: generationParameters)
+        let result = try await generateResult(text: text, voice: voice, refAudio: refAudio,
+            refText: refText, language: language, generationParameters: generationParameters, validateMultilingual: false)
         return result.audio
     }
 
     public func generateWithCompletion(
         text: String, voice: String?, refAudio: sending MLXArray?, refText: String?,
         language: String?, generationParameters: GenerateParameters
+    ) async throws -> sending ChatterboxGenerationResult {
+        try await generateResult(text: text, voice: voice, refAudio: refAudio, refText: refText,
+            language: language, generationParameters: generationParameters, validateMultilingual: true)
+    }
+
+    private func generateResult(
+        text: String, voice: String?, refAudio: sending MLXArray?, refText: String?,
+        language: String?, generationParameters: GenerateParameters, validateMultilingual: Bool
     ) async throws -> sending ChatterboxGenerationResult {
         try Task.checkCancellation()
         // Use reference audio, or fall back to default conditioning
@@ -754,7 +762,7 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         }
 
         // Tokenize text
-        let textTokens = try tokenizeText(text, language: language)
+        let textTokens = try tokenizeText(text, language: language, validateMultilingual: validateMultilingual)
         print("[Chatterbox] Text tokenized: \(textTokens.shape)")
 
         let temperature = generationParameters.temperature
@@ -766,12 +774,13 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         let hasPromptTokens = t3Cond.condPromptSpeechTokens != nil
             && (t3Cond.condPromptSpeechTokens?.dim(1) ?? 0) > 0
         let maxTokens: Int
+        let requestedBudget = validateMultilingual ? generationParameters.maxTokens ?? config.t3Config.maxSpeechTokens : config.t3Config.maxSpeechTokens
         if hasPromptTokens {
-            maxTokens = min(config.t3Config.maxSpeechTokens, generationParameters.maxTokens ?? config.t3Config.maxSpeechTokens)
+            maxTokens = min(config.t3Config.maxSpeechTokens, requestedBudget)
         } else {
             // Estimate: ~10 speech tokens per text token, with min 200, max 768
             let textLen = textTokens.dim(textTokens.ndim - 1)
-            maxTokens = min(generationParameters.maxTokens ?? config.t3Config.maxSpeechTokens, min(768, max(200, textLen * 10)))
+            maxTokens = min(requestedBudget, min(768, max(200, textLen * 10)))
             print("[Chatterbox] No prompt speech tokens — capping maxTokens to \(maxTokens) (text length: \(textLen))")
         }
 

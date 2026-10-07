@@ -15,7 +15,6 @@ import MLXLMCommon
 /// Maps to Python's LLAMA_520M_CONFIG dict.
 public struct LlamaBackboneConfig: Codable, Sendable {
     public var modelType: String
-    public var textPreprocessing: String = "legacy"
     public var vocabSize: Int
     public var hiddenSize: Int
     public var numHiddenLayers: Int
@@ -49,7 +48,6 @@ public struct LlamaBackboneConfig: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
-        case textPreprocessing = "text_preprocessing"
         case vocabSize = "vocab_size"
         case hiddenSize = "hidden_size"
         case numHiddenLayers = "num_hidden_layers"
