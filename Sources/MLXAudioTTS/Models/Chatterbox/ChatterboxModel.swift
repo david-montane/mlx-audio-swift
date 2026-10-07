@@ -126,7 +126,7 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
             let gpt2Config = config.gpt2Config ?? .medium
             self._t3.wrappedValue = T3GPT2Model(config.t3Config, gpt2Config: gpt2Config)
         } else {
-            self._t3.wrappedValue = T3Model(config.t3Config)
+            self._t3.wrappedValue = T3Model(config.t3Config, backboneVocabSize: config.textPreprocessing == "NFKD,fullcase" ? 8 : nil)
         }
 
         self._s3gen.wrappedValue = CausalMaskedDiffWithXvec(
@@ -250,6 +250,14 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
             result["s3gen.speaker_encoder.\(key)"] = value
         }
 
+        if config.textPreprocessing == "NFKD,fullcase" {
+            // These buffers are computed by the model and are absent from the checkpoint.
+            let parameters = Dictionary(uniqueKeysWithValues: self.parameters().flattened())
+            for key in ["s3gen.decoder.randNoise", "s3gen.encoder.embed.pos_enc.pe",
+                        "s3gen.encoder.up_embed.pos_enc.pe", "s3gen.mel2wav.stftWindow"] {
+                if result[key] == nil { result[key] = parameters[key] }
+            }
+        }
         return result
     }
 
@@ -287,6 +295,10 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
             of: #"up_blocks_(\d+)\."#,
             with: "up_blocks.$1.",
             options: .regularExpression)
+
+        k = k.replacingOccurrences(
+            of: #"^encoder\.(up_)?encoders_(\d+)\."#,
+            with: "encoder.$1encoders.$2.", options: .regularExpression)
 
         // --- 2. Transformer array naming within blocks ---
         // Python: `transformer_0.` → Swift: `transformer_blocks.0.`
@@ -1018,6 +1030,14 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
 
         // Sanitize weights
         let sanitizedWeights = model.sanitize(weights: weights)
+        if localOnly {
+            let computedBuffers = Set(["s3gen.decoder.randNoise", "s3gen.encoder.embed.pos_enc.pe",
+                                       "s3gen.encoder.up_embed.pos_enc.pe", "s3gen.mel2wav.stftWindow"])
+            let addedBufferCount = computedBuffers.filter { weights[$0] == nil && sanitizedWeights[$0] != nil }.count
+            guard sanitizedWeights.count == weights.count + addedBufferCount else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
 
         // Quantization
         if config.quantization != nil || config.perLayerQuantization != nil {

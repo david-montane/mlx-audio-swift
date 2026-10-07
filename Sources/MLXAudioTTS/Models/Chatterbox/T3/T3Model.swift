@@ -271,9 +271,11 @@ public class T3Model: Module {
     @ModuleInfo(key: "text_head") var textHead: Linear
     @ModuleInfo(key: "speech_head") var speechHead: Linear
 
-    public init(_ hp: T3Configuration = .englishOnly) {
+    public init(_ hp: T3Configuration = .englishOnly, backboneVocabSize: Int? = nil) {
         self.hp = hp
-        self.llamaConfig = .llama520M
+        var backboneConfig = LlamaBackboneConfig.llama520M
+        if let backboneVocabSize { backboneConfig.vocabSize = backboneVocabSize }
+        self.llamaConfig = backboneConfig
         self.dim = llamaConfig.hiddenSize
 
         self._tfmr.wrappedValue = T3LlamaInner(llamaConfig)

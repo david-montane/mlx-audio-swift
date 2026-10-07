@@ -114,6 +114,8 @@ private func makeNonlinear(configStr: String, channels: Int) -> [Module] {
         switch String(part).lowercased() {
         case "batchnorm":
             layers.append(BatchNorm(featureCount: channels))
+        case "batchnorm_":
+            layers.append(BatchNorm(featureCount: channels, affine: false))
         case "relu":
             layers.append(ReLUModule())
         default:
@@ -379,8 +381,6 @@ class CAMLayer: Module {
     @ModuleInfo(key: "linear_local") var linearLocal: Conv1d
     @ModuleInfo(key: "linear1") var linear1: Conv1d
     @ModuleInfo(key: "linear2") var linear2: Conv1d
-    @ModuleInfo(key: "bn1") var bn1: BatchNorm
-    @ModuleInfo(key: "bn2") var bn2: BatchNorm
 
     let segLen: Int
     let outChannels: Int
@@ -410,8 +410,6 @@ class CAMLayer: Module {
             inputChannels: innerChannels, outputChannels: outChannels,
             kernelSize: 1, stride: 1, padding: 0, bias: true
         )
-        self._bn1.wrappedValue = BatchNorm(featureCount: innerChannels)
-        self._bn2.wrappedValue = BatchNorm(featureCount: outChannels)
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -427,10 +425,8 @@ class CAMLayer: Module {
 
         // Bottleneck: reduce -> relu -> expand -> sigmoid
         var m = conv1dBCT(linear1, context)
-        m = batchNormBCT(bn1, m)
         m = relu(m)
         m = conv1dBCT(linear2, m)
-        m = batchNormBCT(bn2, m)
         m = sigmoid(m)
 
         return y * m // (B, outChannels, T)
@@ -530,7 +526,7 @@ class TransitLayer: Module {
         self._nonlinear.wrappedValue = makeNonlinear(configStr: configStr, channels: inChannels)
         self._linear.wrappedValue = Conv1d(
             inputChannels: inChannels, outputChannels: outChannels,
-            kernelSize: 1, stride: 1, padding: 0, bias: true
+            kernelSize: 1, stride: 1, padding: 0, bias: false
         )
     }
 
@@ -655,7 +651,7 @@ public class CAMPPlus: Module {
         self._pool.wrappedValue = StatsPool()
         self._dense.wrappedValue = DenseLayer(
             inChannels: channels * 2, outChannels: embeddingSize,
-            configStr: "batchnorm", bias: false
+            configStr: "batchnorm_", bias: false
         )
     }
 
