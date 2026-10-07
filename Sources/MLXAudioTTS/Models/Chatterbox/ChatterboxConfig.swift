@@ -15,6 +15,7 @@ import MLXLMCommon
 /// Maps to Python's LLAMA_520M_CONFIG dict.
 public struct LlamaBackboneConfig: Codable, Sendable {
     public var modelType: String
+    public var textPreprocessing: String = "legacy"
     public var vocabSize: Int
     public var hiddenSize: Int
     public var numHiddenLayers: Int
@@ -48,6 +49,7 @@ public struct LlamaBackboneConfig: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
+        case textPreprocessing = "text_preprocessing"
         case vocabSize = "vocab_size"
         case hiddenSize = "hidden_size"
         case numHiddenLayers = "num_hidden_layers"
@@ -319,6 +321,7 @@ public struct VoiceEncoderConfiguration: Codable, Sendable {
 /// - Turbo: full config with `t3`, `gpt2`, `voice_encoder`, `s3gen` sections
 public struct ChatterboxConfiguration: Codable, Sendable {
     public var modelType: String
+    public var textPreprocessing: String = "legacy"
     public var t3Config: T3Configuration
     public var gpt2Config: GPT2BackboneConfig?
     public var s3Sr: Int
@@ -349,6 +352,7 @@ public struct ChatterboxConfiguration: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
+        case textPreprocessing = "text_preprocessing"
         case t3Config = "t3_config"
         case t3 = "t3"
         case gpt2 = "gpt2"
@@ -418,6 +422,7 @@ public struct ChatterboxConfiguration: Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         self.modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "chatterbox"
+        self.textPreprocessing = try container.decodeIfPresent(String.self, forKey: .textPreprocessing) ?? "legacy"
 
         // T3 config: try "t3_config" first (our format), then "t3" (HF Turbo format)
         if let t3 = try container.decodeIfPresent(T3Configuration.self, forKey: .t3Config) {
@@ -483,6 +488,7 @@ public struct ChatterboxConfiguration: Codable, Sendable {
     public func encode(to encoder: Swift.Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(modelType, forKey: .modelType)
+        try container.encode(textPreprocessing, forKey: .textPreprocessing)
         try container.encode(t3Config, forKey: .t3Config)
         try container.encodeIfPresent(gpt2Config, forKey: .gpt2)
         try container.encode(s3Sr, forKey: .s3Sr)

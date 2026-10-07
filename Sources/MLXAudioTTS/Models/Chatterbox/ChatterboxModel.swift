@@ -52,6 +52,12 @@ public struct DefaultConditioning {
 /// Two variants:
 /// - **Regular** (`Chatterbox-TTS-fp16`): LLaMA 520M, 500M params, 23 languages, emotion control
 /// - **Turbo** (`chatterbox-turbo-fp16`): GPT-2 Medium, 350M params, English only, faster
+public struct ChatterboxGenerationResult {
+    public let audio: MLXArray
+    public let didReachEOS: Bool
+    public let tokenCount: Int
+}
+
 public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Sendable {
 
     // MARK: - Configuration
@@ -462,12 +468,29 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
     // MARK: - Text Tokenization
 
     /// Tokenize text into token IDs for T3.
-    func tokenizeText(_ text: String) throws -> MLXArray {
+    func tokenizeText(_ text: String, language: String? = nil) throws -> MLXArray {
         guard let tokenizer = tokenizer else {
             throw AudioGenerationError.modelNotInitialized("Tokenizer not loaded")
         }
 
-        let encoded = tokenizer.encode(text: text)
+        var input = text
+        if config.t3Config.isMultilingual {
+            guard let language, ["es", "en"].contains(language.lowercased()),
+                  config.textPreprocessing.lowercased() == "nfkd,fullcase" else {
+                throw AudioGenerationError.invalidInput("This multilingual runtime supports V3 Spanish and English.")
+            }
+            input = input.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+            for (before, after) in [("...", ", "), ("…", ", "), (":", ","), (" - ", ", "),
+                                    (";", ", "), ("—", "-"), ("–", "-"), (" ,", ","),
+                                    ("“", "\""), ("”", "\""), ("‘", "'"), ("’", "'")] {
+                input = input.replacingOccurrences(of: before, with: after)
+            }
+            input = input.trimmingCharacters(in: .whitespaces)
+            if let last = input.last, !".!?-,、，。？！".contains(last) { input += "." }
+            input = "[\(language.lowercased())]" + input.decomposedStringWithCompatibilityMapping
+            input = input.replacingOccurrences(of: " ", with: "[SPACE]")
+        }
+        let encoded = tokenizer.encode(text: input)
 
         if config.meanflow {
             // Turbo: GPT-2 tokenizer — use raw token IDs, no SOT/EOT wrapping
@@ -686,6 +709,16 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         language: String?,
         generationParameters: GenerateParameters
     ) async throws -> sending MLXArray {
+        let result = try await generateWithCompletion(text: text, voice: voice, refAudio: refAudio,
+            refText: refText, language: language, generationParameters: generationParameters)
+        return result.audio
+    }
+
+    public func generateWithCompletion(
+        text: String, voice: String?, refAudio: sending MLXArray?, refText: String?,
+        language: String?, generationParameters: GenerateParameters
+    ) async throws -> sending ChatterboxGenerationResult {
+        try Task.checkCancellation()
         // Use reference audio, or fall back to default conditioning
         let t3Cond: T3Cond
         let xVector: MLXArray
@@ -721,7 +754,7 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         }
 
         // Tokenize text
-        let textTokens = try tokenizeText(text)
+        let textTokens = try tokenizeText(text, language: language)
         print("[Chatterbox] Text tokenized: \(textTokens.shape)")
 
         let temperature = generationParameters.temperature
@@ -734,11 +767,11 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
             && (t3Cond.condPromptSpeechTokens?.dim(1) ?? 0) > 0
         let maxTokens: Int
         if hasPromptTokens {
-            maxTokens = config.t3Config.maxSpeechTokens
+            maxTokens = min(config.t3Config.maxSpeechTokens, generationParameters.maxTokens ?? config.t3Config.maxSpeechTokens)
         } else {
             // Estimate: ~10 speech tokens per text token, with min 200, max 768
             let textLen = textTokens.dim(textTokens.ndim - 1)
-            maxTokens = min(768, max(200, textLen * 10))
+            maxTokens = min(generationParameters.maxTokens ?? config.t3Config.maxSpeechTokens, min(768, max(200, textLen * 10)))
             print("[Chatterbox] No prompt speech tokens — capping maxTokens to \(maxTokens) (text length: \(textLen))")
         }
 
@@ -780,6 +813,9 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         eval(speechTokens)
         print("[Chatterbox] Stage 1 complete: \(speechTokens.shape) in \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - t3Start))s")
 
+        let flattened = speechTokens.reshaped([-1])
+        let didReachEOS = flattened[flattened.size - 1].item(Int.self) == config.t3Config.stopSpeechToken
+        let tokenCount = flattened.size - (didReachEOS ? 2 : 1)
         // Post-process: remove OOV tokens and append silence
         let cleanTokens = dropInvalidTokens(speechTokens)
         // Append 3 silence tokens (S3GEN_SIL = 4299) to reduce artifacts at end
@@ -856,7 +892,8 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         }
 
         print("[Chatterbox] Stage 3 complete: waveform \(waveform.shape) in \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - vocStart))s")
-        return waveform
+        try Task.checkCancellation()
+        return ChatterboxGenerationResult(audio: waveform, didReachEOS: didReachEOS, tokenCount: tokenCount)
     }
 
     public func generateStream(
@@ -933,8 +970,17 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
 
     public static func fromModelDirectory(
         _ modelDir: URL,
-        hfToken: String?
+        hfToken: String?,
+        localOnly: Bool = false
     ) async throws -> ChatterboxModel {
+        if localOnly {
+            for filename in ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "conds.safetensors"] {
+                let values = try modelDir.appendingPathComponent(filename).resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                guard values.isRegularFile == true, values.isSymbolicLink == false else {
+                    throw AudioGenerationError.modelNotInitialized("Missing local Chatterbox asset.")
+                }
+            }
+        }
         // Load config
         let configURL = modelDir.appendingPathComponent("config.json")
         let config: ChatterboxConfiguration
@@ -969,7 +1015,7 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         }
 
         // Update model parameters — allow unused keys since we drop tokenizer weights
-        try model.update(parameters: ModuleParameters.unflattened(sanitizedWeights), verify: [])
+        try model.update(parameters: ModuleParameters.unflattened(sanitizedWeights), verify: localOnly ? .all : [])
 
         eval(model)
 
@@ -1011,6 +1057,14 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         if FileManager.default.fileExists(atPath: condsURL.path) {
             do {
                 let condsWeights = try MLX.loadArrays(url: condsURL)
+                if localOnly {
+                    let expectedShapes = ["t3.speaker_emb": [1, 256], "t3.cond_prompt_speech_tokens": [1, 150],
+                        "t3.emotion_adv": [1, 1, 1], "gen.embedding": [1, 192],
+                        "gen.prompt_token": [1, 157], "gen.prompt_token_len": [1], "gen.prompt_feat": [1, 314, 80]]
+                    guard expectedShapes.allSatisfy({ condsWeights[$0.key]?.shape == $0.value }) else {
+                        throw AudioGenerationError.invalidInput("Invalid default conditioning.")
+                    }
+                }
                 model.defaultConditioning = DefaultConditioning(
                     speakerEmb: condsWeights["t3.speaker_emb"] ?? MLXArray.zeros([1, 256]),
                     condPromptSpeechTokens: condsWeights["t3.cond_prompt_speech_tokens"] ?? MLXArray.zeros([1, 0]).asType(.int32),
@@ -1026,6 +1080,13 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
             } catch {
                 print("Warning: Could not load default conditioning from conds.safetensors: \(error)")
             }
+        }
+
+        if localOnly {
+            guard model.tokenizer != nil, model.defaultConditioning != nil else {
+                throw AudioGenerationError.modelNotInitialized("Local Chatterbox requires tokenizer and default conditioning.")
+            }
+            return model
         }
 
         // Load S3TokenizerV2 from separate HuggingFace repo (needed for voice cloning)
