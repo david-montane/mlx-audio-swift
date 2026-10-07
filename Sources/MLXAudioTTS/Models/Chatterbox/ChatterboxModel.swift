@@ -718,7 +718,11 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         text: String, voice: String?, refAudio: sending MLXArray?, refText: String?,
         language: String?, generationParameters: GenerateParameters
     ) async throws -> sending ChatterboxGenerationResult {
-        try await generateResult(text: text, voice: voice, refAudio: refAudio, refText: refText,
+        guard config.t3Config.isMultilingual, config.textPreprocessing.lowercased() == "nfkd,fullcase",
+              (generationParameters.maxTokens ?? config.t3Config.maxSpeechTokens) > 0 else {
+            throw AudioGenerationError.invalidInput("Completion requires multilingual V3 and a positive token budget.")
+        }
+        return try await generateResult(text: text, voice: voice, refAudio: refAudio, refText: refText,
             language: language, generationParameters: generationParameters, validateMultilingual: true)
     }
 
@@ -823,8 +827,9 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         print("[Chatterbox] Stage 1 complete: \(speechTokens.shape) in \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - t3Start))s")
 
         let flattened = speechTokens.reshaped([-1])
-        let didReachEOS = flattened[flattened.size - 1].item(Int.self) == config.t3Config.stopSpeechToken
-        let tokenCount = flattened.size - (didReachEOS ? 2 : 1)
+        let didReachEOS = validateMultilingual && flattened.size > 0
+            && flattened[flattened.size - 1].item(Int.self) == config.t3Config.stopSpeechToken
+        let tokenCount = validateMultilingual ? max(0, flattened.size - (didReachEOS ? 2 : 1)) : 0
         // Post-process: remove OOV tokens and append silence
         let cleanTokens = dropInvalidTokens(speechTokens)
         // Append 3 silence tokens (S3GEN_SIL = 4299) to reduce artifacts at end
