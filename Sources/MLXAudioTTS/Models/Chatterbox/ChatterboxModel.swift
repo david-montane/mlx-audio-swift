@@ -175,7 +175,11 @@ public final class ChatterboxModel: Module, SpeechGenerationModel, @unchecked Se
         }
 
         // Sub-model sanitization
-        let sanitizedVE = voiceEncoder.sanitize(weights: veWeights)
+        var sanitizedVE = voiceEncoder.sanitize(weights: veWeights)
+        // The converted V3 checkpoint stores these scalar parameters as length-one tensors.
+        for key in ["similarity_weight", "similarity_bias"] {
+            if sanitizedVE[key]?.shape == [1] { sanitizedVE[key] = sanitizedVE[key]?.reshaped([]) }
+        }
         let sanitizedT3: [String: MLXArray]
         if let t3llama = t3 as? T3Model {
             sanitizedT3 = t3llama.sanitize(weights: t3Weights)
